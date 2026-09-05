@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Drip Well</title>
+  <meta name="description" content="Tap the well. Buy drips. Fold for a bigger idle run.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Drip Well">
+  <meta property="og:description" content="Tap the well. Buy drips. Fold for a bigger idle run.">
+  <meta property="og:url" content="https://chive55.itch.io/drip-well">
+  <meta property="og:image" content="https://raw.githubusercontent.com/chive55/drip-well/main/og.svg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Drip Well">
+  <meta name="twitter:description" content="Tap the well. Buy drips. Fold for a bigger idle run.">
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/chive55/drip-well/main/og.svg">
+  <link rel="canonical" href="https://chive55.itch.io/drip-well">
+  <style>
+    :root { color-scheme: dark; --accent: #5CE1FF; --ink: #061018; }
+    * { box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; background: #07080f; overflow: hidden; font-family: ui-sans-serif, system-ui, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #hud {
+      position: fixed; inset: 0; pointer-events: none;
+      display: flex; flex-direction: column; align-items: stretch; justify-content: space-between;
+      padding: calc(12px + env(safe-area-inset-top)) 14px calc(12px + env(safe-area-inset-bottom));
+      color: #eef2ff;
+    }
+    #top {
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    }
+    #score {
+      font-variant-numeric: tabular-nums; letter-spacing: 0.04em; font-size: 22px; font-weight: 700;
+      text-shadow: 0 0 18px #5CE1FF88;
+    }
+    #score small { display: block; color: #8aa4b8; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; }
+    #best {
+      font-variant-numeric: tabular-nums; color: #8aa4b8; font-size: 13px; text-align: right;
+    }
+    #shop {
+      pointer-events: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      max-width: 520px; width: 100%; margin: 0 auto;
+    }
+    #shop button, #panel button {
+      min-height: 48px; border: 1px solid #ffffff22; border-radius: 12px;
+      background: #0b1220ee; color: #e8f6ff; font-weight: 700; cursor: pointer;
+      text-align: left; padding: 8px 12px; font-size: 13px;
+    }
+    #shop button:disabled { opacity: 0.42; cursor: default; }
+    #shop button b { color: var(--accent); }
+    #shop .wide { grid-column: 1 / -1; background: #5CE1FF; color: var(--ink); text-align: center; border: 0; }
+    #shop .wide:disabled { background: #1a2a38; color: #6d8396; }
+    #panel {
+      pointer-events: auto; text-align: center; background: #0b0d18cc;
+      border: 1px solid #ffffff22; border-radius: 16px; padding: 24px 28px;
+      max-width: 420px; margin: auto;
+    }
+    #panel h1 { margin: 0 0 8px; letter-spacing: 0.16em; font-size: 28px; }
+    #panel p { margin: 0 0 16px; color: #b7c0e0; }
+    #panel button {
+      min-height: 44px; padding: 0 20px; border: 0; border-radius: 10px;
+      background: var(--accent); color: var(--ink); font-weight: 700; cursor: pointer; text-align: center;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud">
+    <div id="top">
+      <div id="score">0<small>0 /s</small></div>
+      <div id="best">BEST 0</div>
+    </div>
+    <div id="panel">
+      <h1>DRIP WELL</h1>
+      <p>Tap the well for sparks. Buy drips that keep running. Fold the well when it is fat enough.</p>
+      <button id="go" type="button">Open well</button>
+    </div>
+    <div id="shop" class="hidden"></div>
+  </div>
+  <script>
+    const KEY = 'drip-well-save';
+    const BEST_KEY = 'drip-well-best';
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const bestEl = document.getElementById('best');
+    const panel = document.getElementById('panel');
+    const go = document.getElementById('go');
+    const shop = document.getElementById('shop');
+
+    const GENS = [
+      { id: 'drip', name: 'Drip', rate: 1, base: 15 },
+      { id: 'sluice', name: 'Sluice', rate: 8, base: 120 },
+      { id: 'condenser', name: 'Condenser', rate: 47, base: 1300 },
+      { id: 'conduit', name: 'Conduit', rate: 260, base: 14000 },
+      { id: 'reservoir', name: 'Reservoir', rate: 1600, base: 160000 }
+    ];
+
+    let running = false, last = 0, shake = 0, flash = 0;
+    let sparks = 0, tapLv = 0, owned = [0, 0, 0, 0, 0], folds = 0, best = 0, savedAt = Date.now();
+    const drops = [];
+    const rings = [];
+
+    function fmt(n) {
+      n = Math.floor(n);
+      if (n < 1000) return String(n);
+      const u = ['K', 'M', 'B', 'T', 'Qa'];
+      let i = -1;
+      while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+      return n.toFixed(n >= 100 ? 0 : 1) + u[i];
+    }
+    function foldMult() { return 1 + folds * 0.25; }
+    function tapPower() { return (1 + tapLv * 1.35) * foldMult(); }
+    function genCost(i) { return Math.floor(GENS[i].base * Math.pow(1.155, owned[i])); }
+    function tapCost() { return Math.floor(20 * Math.pow(1.65, tapLv)); }
+    function rate() {
+      let r = 0;
+      for (let i = 0; i < GENS.length; i++) r += owned[i] * GENS[i].rate;
+      return r * foldMult();
+    }
+    function foldGain() { return Math.floor(Math.sqrt(sparks / 1e6)); }
+    function canFold() { return foldGain() >= 1; }
+
+    function load() {
+      try {
+        const raw = localStorage.getItem(KEY);
+        if (raw) {
+          const s = JSON.parse(raw);
+          sparks = s.sparks || 0;
+          tapLv = s.tapLv || 0;
+          owned = Array.isArray(s.owned) ? s.owned : owned;
+          folds = s.folds || 0;
+          best = s.best || 0;
+          savedAt = s.t || Date.now();
+        }
+        const b = Number(localStorage.getItem(BEST_KEY) || best || 0);
+        if (b > best) best = b;
+      } catch (e) {}
+    }
+    function save() {
+      try {
+        localStorage.setItem(KEY, JSON.stringify({
+          sparks, tapLv, owned, folds, best, t: Date.now()
+        }));
+        localStorage.setItem(BEST_KEY, String(Math.floor(best)));
+      } catch (e) {}
+    }
+    function applyOffline() {
+      const now = Date.now();
+      const dt = Math.min(8 * 3600, Math.max(0, (now - savedAt) / 1000));
+      if (dt > 1) sparks += rate() * dt;
+      savedAt = now;
+      if (sparks > best) best = sparks;
+    }
+
+    function resize() {
+      canvas.width = innerWidth * devicePixelRatio;
+      canvas.height = innerHeight * devicePixelRatio;
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    function hud() {
+      scoreEl.innerHTML = fmt(sparks) + '<small>' + fmt(rate()) + ' /s \u00b7 x' + foldMult().toFixed(2) + '</small>';
+      bestEl.textContent = 'BEST ' + fmt(best);
+    }
+
+    function renderShop() {
+      const parts = [];
+      parts.push('<button type="button" data-buy="tap"' + (sparks < tapCost() ? ' disabled' : '') + '>Tap +' + fmt(tapPower()) + '<br><b>' + fmt(tapCost()) + '</b></button>');
+      for (let i = 0; i < GENS.length; i++) {
+        const g = GENS[i];
+        const c = genCost(i);
+        parts.push('<button type="button" data-buy="' + i + '"' + (sparks < c ? ' disabled' : '') + '>' + g.name + ' \u00d7' + owned[i] + '<br><b>' + fmt(c) + '</b></button>');
+      }
+      parts.push('<button type="button" class="wide" data-buy="fold"' + (canFold() ? '' : ' disabled') + '>' + (canFold() ? 'Fold well  +' + foldGain() + ' fold' : 'Fold at 1.0M sparks') + '</button>');
+      shop.innerHTML = parts.join('');
+    }
+
+    function pulse(x, y, r, life) { rings.push({ x, y, r, life, max: life }); }
+    function spawnDrops(n) {
+      const cap = Math.min(28, 6 + Math.floor(Math.log10(1 + rate()) * 6));
+      for (let i = 0; i < n && drops.length < cap; i++) {
+        drops.push({
+          x: 0.5 + (Math.random() - 0.5) * 0.22,
+          y: -0.05,
+          v: 0.18 + Math.random() * 0.22,
+          s: 2 + Math.random() * 3,
+          a: 0.5 + Math.random() * 0.5
+        });
+      }
+    }
+
+    function buy(kind) {
+      if (kind === 'fold') {
+        if (!canFold()) return;
+        const gain = foldGain();
+        folds += gain;
+        sparks = 0;
+        tapLv = 0;
+        owned = [0, 0, 0, 0, 0];
+        flash = 0.8;
+        shake = 10;
+        panel.querySelector('h1').textContent = 'FOLDED';
+        panel.querySelector('p').textContent = '+' + gain + ' fold \u00b7 multiplier x' + foldMult().toFixed(2) + '. Well reset. Drips will scale harder.';
+        go.textContent = 'Keep dripping';
+        panel.classList.remove('hidden');
+        shop.classList.add('hidden');
+        running = false;
+        save();
+        hud();
+        return;
+      }
+      if (kind === 'tap') {
+        const c = tapCost();
+        if (sparks < c) return;
+        sparks -= c;
+        tapLv++;
+      } else {
+        const i = Number(kind);
+        const c = genCost(i);
+        if (sparks < c) return;
+        sparks -= c;
+        owned[i]++;
+        spawnDrops(4);
+      }
+      shake = 4;
+      save();
+      renderShop();
+      hud();
+      beep(kind === 'tap' ? 520 : 380, 0.04);
+    }
+
+    shop.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b || b.disabled) return;
+      buy(b.dataset.buy);
+    });
+
+    let audioCtx;
+    function beep(f, dur) {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.frequency.value = f;
+        o.type = 'sine';
+        g.gain.value = 0.04;
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start();
+        g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+        o.stop(audioCtx.currentTime + dur);
+      } catch (e) {}
+    }
+
+    function tapWell(clientX, clientY) {
+      if (!running) return;
+      sparks += tapPower();
+      if (sparks > best) best = sparks;
+      shake = 6;
+      flash = 0.18;
+      const dpr = devicePixelRatio;
+      pulse(clientX * dpr, clientY * dpr, 16 * dpr, 0.35);
+      spawnDrops(2);
+      beep(660, 0.03);
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      tapWell(e.clientX, e.clientY);
+    });
+
+    function startRun() {
+      panel.classList.add('hidden');
+      shop.classList.remove('hidden');
+      running = true;
+      last = performance.now();
+      applyOffline();
+      renderShop();
+      hud();
+      save();
+    }
+    go.onclick = startRun;
+
+    load();
+    applyOffline();
+    hud();
+    if (sparks > 0 || folds > 0 || owned.some(Boolean)) {
+      panel.querySelector('p').textContent = 'Well still dripping. Offline sparks are already in the tank.';
+      go.textContent = 'Continue';
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        save();
+        last = 0;
+      } else {
+        applyOffline();
+        last = performance.now();
+        hud();
+        if (running) renderShop();
+      }
+    });
+
+    let shopTick = 0;
+    function loop(now) {
+      requestAnimationFrame(loop);
+      if (document.hidden) return;
+      const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
+      last = now;
+
+      if (running) {
+        sparks += rate() * dt;
+        if (sparks > best) best = sparks;
+        shopTick += dt;
+        if (shopTick > 0.35) {
+          shopTick = 0;
+          renderShop();
+          hud();
+        }
+        if ((now | 0) % 8 === 0) spawnDrops(1);
+      }
+
+      shake *= 0.86;
+      flash *= 0.9;
+      const dpr = devicePixelRatio;
+      const w = canvas.width, h = canvas.height;
+      const ox = (Math.random() - 0.5) * shake * dpr;
+      const oy = (Math.random() - 0.5) * shake * dpr;
+
+      ctx.fillStyle = '#07080f';
+      ctx.fillRect(0, 0, w, h);
+
+      const cx = w * 0.5 + ox;
+      const cy = h * 0.38 + oy;
+      const rad = Math.min(w, h) * 0.16;
+
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      for (let i = 4; i >= 1; i--) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad + i * 28 * dpr + Math.sin(now / 700 + i) * 6 * dpr, 0, Math.PI * 2);
+        ctx.strokeStyle = '#5CE1FF';
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const grd = ctx.createRadialGradient(cx, cy, rad * 0.1, cx, cy, rad);
+      grd.addColorStop(0, '#e7ffff');
+      grd.addColorStop(0.35, '#5CE1FF');
+      grd.addColorStop(1, '#123044');
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+      ctx.fillStyle = grd;
+      ctx.fill();
+      ctx.shadowColor = '#5CE1FF';
+      ctx.shadowBlur = 28 * dpr;
+      ctx.strokeStyle = '#9af0ff';
+      ctx.lineWidth = 3 * dpr;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      for (const d of drops) {
+        d.y += d.v * dt;
+        d.a -= dt * 0.25;
+      }
+      for (let i = drops.length - 1; i >= 0; i--) if (drops[i].y > 1.1 || drops[i].a <= 0) drops.splice(i, 1);
+      for (const d of drops) {
+        ctx.globalAlpha = Math.max(0, d.a);
+        ctx.fillStyle = '#5CE1FF';
+        ctx.beginPath();
+        ctx.arc(d.x * w, d.y * h, d.s * dpr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      for (const r of rings) r.life -= dt;
+      for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+      for (const r of rings) {
+        const t = 1 - r.life / r.max;
+        ctx.beginPath();
+        ctx.arc(r.x, r.y, r.r + t * 80 * dpr, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(92,225,255,' + (1 - t) + ')';
+        ctx.lineWidth = 3 * dpr * (1 - t);
+        ctx.stroke();
+      }
+
+      if (flash > 0.02) {
+        ctx.fillStyle = 'rgba(92,225,255,' + (flash * 0.25) + ')';
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      if (!running && (now / 16 | 0) % 20 === 0) spawnDrops(1);
+    }
+    requestAnimationFrame(loop);
+    setInterval(save, 4000);
+  </script>
+</body>
+</html>
